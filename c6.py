@@ -133,8 +133,10 @@ def train_cnn(model, optimizer, loss_fn, x_full, y_full, C):
         # print(f"[PatchCNN] epoch {epoch}, loss={loss.item():.4f}")
         loss.backward()
         optimizer.step()
-    print(f"Avg Loss: {sum(losses) / len(losses):.4f}")
+    avg_loss = sum(losses) / len(losses)
+    print(f"Avg Loss: {avg_loss:.4f}")
     torch.save(model.state_dict(), "cnn.pth")
+    return avg_loss
 
 # ── 5) Train GridTransformer ──────────────────────────────────────────────────
 def train_transformer(model, optimizer, loss_fn, x_full, y_full, C):
@@ -151,8 +153,10 @@ def train_transformer(model, optimizer, loss_fn, x_full, y_full, C):
         # print(f"[GridTrans] epoch {epoch}, loss={loss.item():.4f}")
         loss.backward()
         optimizer.step()
-    print(f"Avg Loss: {sum(losses) / len(losses):.4f}")
+    avg_loss = sum(losses) / len(losses)
+    print(f"Avg Loss: {avg_loss:.4f}")
     torch.save(model.state_dict(), "transformer.pth")
+    return avg_loss
 
 # ── 6) Train FusionModel ──────────────────────────────────────────────────────
 def train_fusion(model, optimizer, loss_fn, x_full, y_full, C):
@@ -169,8 +173,10 @@ def train_fusion(model, optimizer, loss_fn, x_full, y_full, C):
         # print(f"[Fusion] epoch {epoch}, loss={loss.item():.4f}")
         loss.backward()
         optimizer.step()
-    print(f"Avg Loss: {sum(losses) / len(losses):.4f}")
+    avg_loss = sum(losses) / len(losses)
+    print(f"Avg Loss: {avg_loss:.4f}")
     torch.save(model.state_dict(), "fusion.pth")
+    return avg_loss
 
 # ── 7) Final debug & accuracy ─────────────────────────────────────────────────
 def evaluate(model, x_full, Oh, Ow, out0):
@@ -204,6 +210,10 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
     grid_match_history = []
     pixel_accuracy_history = []
 
+    cnn_losses = []
+    transformer_losses = []
+    fusion_losses = []
+
     for task_id, task in train_tasks.items():
         print(f"[TASK]: {task_id}, [COUNT]: {task_count}")
         for i, pair in enumerate(task['train']):
@@ -213,9 +223,13 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
             Oh, Ow, padded_in, padded_out = pad_grids(inp, out, train_tasks, train_sols, task_id)
             x_full, y_full, _, _, _ = create_tensors(padded_in, padded_out)
 
-            train_cnn(cnn, opt_p, loss_fn, x_full, y_full, C)
-            train_transformer(transformer, opt_g, loss_fn, x_full, y_full, C)
-            train_fusion(fusion, opt_f, loss_fn, x_full, y_full, C)
+            cnn_loss = train_cnn(cnn, opt_p, loss_fn, x_full, y_full, C)
+            transformer_loss = train_transformer(transformer, opt_g, loss_fn, x_full, y_full, C)
+            fusion_loss = train_fusion(fusion, opt_f, loss_fn, x_full, y_full, C)
+
+            cnn_losses.append(cnn_loss)
+            transformer_losses.append(transformer_loss)
+            fusion_losses.append(fusion_loss)
 
         if task_count % 5 == 0: # only eval every 5 IDs 
             for i, pair in enumerate(task['test']):
@@ -252,7 +266,7 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
             x_full, y_full, _, _, _ = create_tensors(padded_in, padded_out)
 
             eval_grid_match, eval_pixel_accuracy = evaluate(fusion, x_full, Oh, Ow, out)
-            
+
             eval_grid_match_history.append(eval_grid_match)
             eval_pixel_accuracy_history.append(eval_pixel_accuracy)
     print(f"[GRID MATCHES]: {sum(eval_grid_match_history)}/{len(eval_grid_match_history)}\n")
