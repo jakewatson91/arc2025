@@ -4,13 +4,14 @@ import torch
 import torch.nn as nn
 
 from models import PatchCNN, GridTransformer, FusionModel
+from plot_utils import plot_training_losses
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
 PATCH_SIZE    = 11
 GRID_DIM      = 30 # max grid size = 900
 NUM_COLORS    = 10
 LR            = 1e-5
-EPOCHS        = 1
+EPOCHS        = 100
 DEVICE        = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 HALF_PATCH    = PATCH_SIZE // 2
 PAD_VAL       = -1
@@ -24,14 +25,10 @@ def to_onehot(grid: np.ndarray, num_classes: int = NUM_COLORS) -> torch.Tensor:
 # padding breaks grids into smaller squares to focus on local patterns
 # this gives the model much more tasks to train on
 def pad_grids(original, target):
-    # inp = np.array(tasks[task_id]['train'][0]['input'])
-    # out = np.array(sols[task_id][0])
 
     # compute canvas dims
     H, W   = original.shape
     target_H, target_W = target.shape
-    # Ch     = max(H, Oh)
-    # Cw     = max(W, Ow)
 
     # pad input
     pad_top_in    = HALF_PATCH
@@ -144,14 +141,15 @@ def train_fusion(model, optimizer, loss_fn, X, y, C, save=True):
     return avg_loss
 
 # ── 7) Final debug & accuracy ─────────────────────────────────────────────────
-def evaluate(model, X_full, target_H, target_W, target):
+def evaluate(model, X_full, target_H, target_W, target, original):
     model.eval()
     with torch.no_grad():
         pred = model(X_full).argmax(1)[0].cpu().numpy()
         cropped_pred = pred[HALF_PATCH: target_H + HALF_PATCH, HALF_PATCH: target_W + HALF_PATCH]
 
-    print(f"\n[DEBUG] Predicted grid:\n{cropped_pred}")
-    print(f"[DEBUG] Ground truth:\n{target}")
+    print(f"\nOriginal grid:\n{original}")
+    print(f"\nPredicted grid:\n{cropped_pred}")
+    print(f"Ground truth:\n{target}")
 
     # exact match?
     grid_match     = np.array_equal(cropped_pred, target)
@@ -164,17 +162,10 @@ def evaluate(model, X_full, target_H, target_W, target):
     
     return int(grid_match), pixel_accuracy
 
-def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
-    C = NUM_COLORS
-    H = GRID_DIM + PATCH_SIZE - 1
-    W = GRID_DIM + PATCH_SIZE - 1
-
-    cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion = build_models(C, H, W)
-
+def train_loop(train_tasks, train_sols, cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion, C, quick_debug):
     task_count = 0
     grid_match_history = []
     pixel_accuracy_history = []
-
     cnn_losses = []
     transformer_losses = []
     fusion_losses = []
@@ -196,38 +187,38 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
             transformer_losses.append(transformer_loss)
             fusion_losses.append(fusion_loss)
 
-        if task_count % 5 == 0: # only eval every 5 IDs 
+        if task_count % 5 == 0:
             for i, pair in enumerate(task['test']):
                 original = np.array(pair['input'])
-                target = np.array(train_sols[task_id][0])  # test labels follow train labels in sols
+                target = np.array(train_sols[task_id][0])
 
                 target_H, target_W, padded_in, padded_out = pad_grids(original, target)
                 X, _, _, _, _ = create_tensors(padded_in, padded_out)
 
-                grid_match, pixel_accuracy = evaluate(fusion, X, target_H, target_W, target)
+                grid_match, pixel_accuracy = evaluate(fusion, X, target_H, target_W, target, original)
 
                 grid_match_history.append(grid_match)
                 pixel_accuracy_history.append(pixel_accuracy)
 
         task_count += 1
 
-        if task_count >= 5: # only train on 5 in/out pairs before evaluating
+        if task_count >= 5:
             break
 
         if quick_debug:
-            return
-    print(f"[GRID MATCHES]: {sum(grid_match_history)}/{len(grid_match_history)}\n")
-    print(f"[AVG PIXEL ACCURACY]: {sum(pixel_accuracy_history)/len(pixel_accuracy_history)}\n")
-        
-    # evaluate
+            break
+
+    plot_training_losses(cnn_losses, transformer_losses, fusion_losses)
+    return grid_match_history, pixel_accuracy_history
+
+def eval_loop(eval_tasks, eval_sols, cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion, C):
     eval_grid_match_history = []
     eval_pixel_accuracy_history = []
 
-    # load pre-trained weights
-    cnn.load_state_dict(torch.load("cnn2.pth", map_location=DEVICE))  # device = torch.device("cuda")
-    transformer.load_state_dict(torch.load("transformer2.pth", map_location=DEVICE))  # device = torch.device("cuda")
-    fusion.load_state_dict(torch.load("fusion2.pth", map_location=DEVICE))  # device = torch.device("cuda")
-    
+    cnn.load_state_dict(torch.load("cnn2.pth", map_location=DEVICE))
+    transformer.load_state_dict(torch.load("transformer2.pth", map_location=DEVICE))
+    fusion.load_state_dict(torch.load("fusion2.pth", map_location=DEVICE))
+
     for task_id, task in eval_tasks.items():
         for i, pair in enumerate(task['train']):
             original = np.array(np.array(pair['input']))
@@ -236,11 +227,10 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
             _, _, padded_in, padded_out = pad_grids(original, target)
             X, y, _, _, _ = create_tensors(padded_in, padded_out)
 
-            # few-shot training on eval examples
             train_cnn(cnn, opt_patch, loss_fn, X, y, C, save=False)
             train_transformer(transformer, opt_transformer, loss_fn, X, y, C, save=False)
             train_fusion(fusion, opt_fusion, loss_fn, X, y, C, save=False)
-        
+
         for i, pair in enumerate(task['test']):
             original = np.array(pair['input'])
             target = np.array(eval_sols[task_id][0])
@@ -248,12 +238,34 @@ def main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False):
             target_H, target_W, padded_in, padded_out = pad_grids(original, target)
             X, _, _, _, _ = create_tensors(padded_in, padded_out)
 
-            eval_grid_match, eval_pixel_accuracy = evaluate(fusion, X, target_H, target_W, target)
+            eval_grid_match, eval_pixel_accuracy = evaluate(fusion, X, target_H, target_W, target, original)
 
             eval_grid_match_history.append(eval_grid_match)
             eval_pixel_accuracy_history.append(eval_pixel_accuracy)
-    print(f"[GRID MATCHES]: {sum(eval_grid_match_history)}/{len(eval_grid_match_history)}\n")
-    print(f"[AVG PIXEL ACCURACY]: {sum(eval_pixel_accuracy_history)/len(eval_pixel_accuracy_history)}\n")
+
+    return eval_grid_match_history, eval_pixel_accuracy_history
+
+def main(train_tasks, train_sols, eval_tasks, eval_sols, do_eval=True, quick_debug=False):
+    C = NUM_COLORS
+    H = GRID_DIM + PATCH_SIZE - 1
+    W = GRID_DIM + PATCH_SIZE - 1
+
+    cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion = build_models(C, H, W)
+
+    grid_match_history, pixel_accuracy_history = train_loop(
+        train_tasks, train_sols, cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion, C, quick_debug
+    )
+
+    print(f"[GRID MATCHES]: {sum(grid_match_history)}/{len(grid_match_history)}\n")
+    print(f"[AVG PIXEL ACCURACY]: {sum(pixel_accuracy_history)/len(pixel_accuracy_history)}\n")
+
+    if do_eval:
+        eval_grid_match_history, eval_pixel_accuracy_history = eval_loop(
+            eval_tasks, eval_sols, cnn, transformer, fusion, loss_fn, opt_patch, opt_transformer, opt_fusion, C
+        )
+
+        print(f"[GRID MATCHES]: {sum(eval_grid_match_history)}/{len(eval_grid_match_history)}\n")
+        print(f"[AVG PIXEL ACCURACY]: {sum(eval_pixel_accuracy_history)/len(eval_pixel_accuracy_history)}\n")
 
 if __name__ == '__main__':
     with open("data/arc-agi_training_challenges.json") as f:
@@ -265,4 +277,4 @@ if __name__ == '__main__':
     with open("data/arc-agi_evaluation_solutions.json") as f:
         eval_sols  = json.load(f)
     
-    main(train_tasks, train_sols, eval_tasks, eval_sols, quick_debug=False)
+    main(train_tasks, train_sols, eval_tasks, eval_sols, do_eval=True, quick_debug=False)
